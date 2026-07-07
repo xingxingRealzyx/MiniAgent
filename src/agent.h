@@ -36,8 +36,8 @@ private:
     std::vector<Message> history_;  // conversation history (excl. system prompt)
     int max_tool_rounds_ = 10;
 
-    // Build the full messages array for API call
-    std::vector<Message> build_messages(const std::string& user_input) const;
+    // Build the full messages array for API call (system prompt + history)
+    std::vector<Message> build_messages() const;
 
     // Execute tool calls and return the tool result messages
     std::vector<Message> execute_tools(const std::vector<ToolCall>& tool_calls);

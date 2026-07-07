@@ -5,6 +5,7 @@
 #include "tools/bash.h"
 
 #include <iostream>
+#include <fstream>
 #include <cassert>
 
 int main() {
@@ -23,11 +24,24 @@ int main() {
 
     std::cout << "[PASS] Tool registry: " << registry.count() << " tools registered\n";
 
-    // Test read_file
+    // Test read_file on a file created by the test itself
+    {
+        std::ofstream f("/tmp/miniagent_test_read.txt");
+        f << "line one\nline two\n";
+    }
     auto args = nlohmann::json::object();
-    args["file_path"] = "/Users/xingxing/workspace/miniagent/CMakeLists.txt";
+    args["file_path"] = "/tmp/miniagent_test_read.txt";
     std::string read_result = registry.execute("read_file", args);
+    assert(read_result.find("line one") != std::string::npos);
+    assert(read_result.find("line two") != std::string::npos);
     std::cout << "[PASS] read_file: " << read_result.size() << " bytes output\n";
+
+    // read_file on a missing file must report an error
+    auto missing_args = nlohmann::json::object();
+    missing_args["file_path"] = "/tmp/miniagent_test_does_not_exist.txt";
+    std::string missing_result = registry.execute("read_file", missing_args);
+    assert(missing_result.find("cannot open file") != std::string::npos);
+    std::cout << "[PASS] read_file: missing file reports error\n";
 
     // Test write_file
     auto write_args = nlohmann::json::object();
@@ -62,6 +76,7 @@ int main() {
 
     // Cleanup
     std::remove("/tmp/miniagent_test_write.txt");
+    std::remove("/tmp/miniagent_test_read.txt");
 
     std::cout << "\nAll tests passed!\n";
     return 0;

@@ -21,8 +21,8 @@
 static void print_banner() {
     std::cout << COLOR_CYAN << COLOR_BOLD
               << "╔══════════════════════════════════╗\n"
-              << "║         MiniAgent v1.0          ║\n"
-              << "║  Minimal General-Purpose Agent  ║\n"
+              << "║         MiniAgent v1.0           ║\n"
+              << "║  Minimal General-Purpose Agent   ║\n"
               << "╚══════════════════════════════════╝\n"
               << COLOR_RESET << "\n"
               << "Type /exit to quit, /clear to reset history\n\n";
@@ -53,13 +53,8 @@ static void run_repl(miniagent::Agent& agent) {
             continue;
         }
 
-        // Support multi-line input: lines starting with "| " are appended
-        // This is a simple approach — type `| ` prefix for continuation lines
-        std::ostringstream input;
-        input << line;
-
         std::cout << "\n";
-        std::string response = agent.run(input.str());
+        agent.run(line);
         std::cout << "\n\n";
     }
 }
@@ -154,7 +149,7 @@ int main(int argc, char* argv[]) {
             return 0;
         }
 
-        std::string response = agent.run(input);
+        agent.run(input);
         std::cout << "\n";
     } else {
         run_repl(agent);

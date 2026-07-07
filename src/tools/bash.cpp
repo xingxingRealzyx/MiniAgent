@@ -1,10 +1,14 @@
 #include "bash.h"
 
-#include <cstdio>
-#include <array>
-#include <memory>
 #include <chrono>
-#include <thread>
+#include <cerrno>
+#include <csignal>
+#include <string>
+
+#include <fcntl.h>
+#include <poll.h>
+#include <sys/wait.h>
+#include <unistd.h>
 
 namespace miniagent {
 
@@ -29,47 +33,100 @@ std::string BashTool::execute(const nlohmann::json& arguments) {
     if (timeout_ms > 300000) timeout_ms = 300000;
     if (timeout_ms < 1000) timeout_ms = 1000;
 
-    // Build command with timeout
-    // Use timeout command on macOS/Linux to enforce limit
-    std::string full_cmd = command + " 2>&1";
-
-    std::array<char, 4096> buffer;
-    std::string result;
-
-    // Open pipe
-    FILE* pipe = popen(full_cmd.c_str(), "r");
-    if (!pipe) {
-        return "Error: failed to execute command";
+    int pipefd[2];
+    if (pipe(pipefd) != 0) {
+        return "Error: failed to create pipe";
     }
 
-    // Read with timeout
-    auto start = std::chrono::steady_clock::now();
+    pid_t pid = fork();
+    if (pid < 0) {
+        close(pipefd[0]);
+        close(pipefd[1]);
+        return "Error: failed to fork";
+    }
 
-    while (fgets(buffer.data(), buffer.size(), pipe) != nullptr) {
-        result += buffer.data();
+    if (pid == 0) {
+        // Child: own process group so the whole command tree can be killed on timeout
+        setpgid(0, 0);
+        dup2(pipefd[1], STDOUT_FILENO);
+        dup2(pipefd[1], STDERR_FILENO);
+        close(pipefd[0]);
+        close(pipefd[1]);
+        execl("/bin/sh", "sh", "-c", command.c_str(), (char*)nullptr);
+        _exit(127);
+    }
 
-        // Check timeout
-        auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
-            std::chrono::steady_clock::now() - start).count();
-        if (elapsed > timeout_ms) {
-            pclose(pipe);
-            if (!result.empty()) {
-                result += "\n[Command timed out after " + std::to_string(timeout_ms) + "ms]";
-            } else {
-                result = "Command timed out after " + std::to_string(timeout_ms) + "ms";
-            }
-            return result;
+    // Also set in parent to close the race with the child's exec
+    setpgid(pid, pid);
+    close(pipefd[1]);
+
+    std::string result;
+    bool timed_out = false;
+    char buf[4096];
+
+    auto deadline = std::chrono::steady_clock::now() +
+                    std::chrono::milliseconds(timeout_ms);
+
+    while (true) {
+        auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
+            deadline - std::chrono::steady_clock::now()).count();
+        if (remaining <= 0) {
+            timed_out = true;
+            break;
+        }
+
+        struct pollfd pfd;
+        pfd.fd = pipefd[0];
+        pfd.events = POLLIN;
+        pfd.revents = 0;
+
+        int pr = poll(&pfd, 1, (int)remaining);
+        if (pr < 0) {
+            if (errno == EINTR) continue;
+            break;
+        }
+        if (pr == 0) {
+            timed_out = true;
+            break;
+        }
+
+        ssize_t n = read(pipefd[0], buf, sizeof(buf));
+        if (n > 0) {
+            result.append(buf, (size_t)n);
+        } else {
+            break;  // EOF (command finished and closed the pipe) or read error
         }
     }
+    close(pipefd[0]);
 
-    int exit_code = pclose(pipe);
+    if (timed_out) {
+        kill(-pid, SIGKILL);
+    }
+
+    int status = 0;
+    while (waitpid(pid, &status, 0) < 0 && errno == EINTR) {}
+
+    if (timed_out) {
+        std::string msg = "Command timed out after " + std::to_string(timeout_ms) + "ms";
+        if (!result.empty()) {
+            result += "\n[" + msg + "]";
+        } else {
+            result = msg;
+        }
+        return result;
+    }
 
     if (result.empty()) {
         result = "(no output)";
     }
 
-    if (exit_code != 0) {
-        result += "\n[Exit code: " + std::to_string(exit_code) + "]";
+    if (WIFEXITED(status)) {
+        int code = WEXITSTATUS(status);
+        if (code != 0) {
+            result += "\n[Exit code: " + std::to_string(code) + "]";
+        }
+    } else if (WIFSIGNALED(status)) {
+        result += "\n[Terminated by signal " + std::to_string(WTERMSIG(status)) + "]";
     }
 
     return result;

@@ -6,6 +6,19 @@ namespace miniagent {
 
 void ToolRegistry::register_tool(std::unique_ptr<Tool> tool) {
     std::string n = tool->name();
+
+    // Re-registering the same name replaces the existing tool
+    auto it = tool_map_.find(n);
+    if (it != tool_map_.end()) {
+        for (auto& t : tools_) {
+            if (t.get() == it->second) {
+                t = std::move(tool);
+                it->second = t.get();
+                return;
+            }
+        }
+    }
+
     tool_map_[n] = tool.get();
     tools_.push_back(std::move(tool));
 }

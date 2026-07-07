@@ -16,7 +16,7 @@ void Agent::reset() {
     history_.clear();
 }
 
-std::vector<Message> Agent::build_messages(const std::string& user_input) const {
+std::vector<Message> Agent::build_messages() const {
     std::vector<Message> messages;
 
     // System prompt
@@ -24,13 +24,10 @@ std::vector<Message> Agent::build_messages(const std::string& user_input) const 
         messages.push_back(Message::system(system_prompt_));
     }
 
-    // History
+    // History (already includes the current user input)
     for (const auto& msg : history_) {
         messages.push_back(msg);
     }
-
-    // Current user input
-    messages.push_back(Message::user(user_input));
 
     return messages;
 }
@@ -60,12 +57,13 @@ std::vector<Message> Agent::execute_tools(const std::vector<ToolCall>& tool_call
         std::istringstream stream(output);
         std::string line;
         int preview_lines = 0;
-        while (std::getline(stream, line) && preview_lines < 5) {
+        while (std::getline(stream, line)) {
+            if (preview_lines >= 5) {
+                std::cout << "  ... (truncated)\n";
+                break;
+            }
             std::cout << "  " << line << "\n";
             preview_lines++;
-        }
-        if (stream.good()) {
-            std::cout << "  ... (truncated)\n";
         }
 
         results.push_back(Message::tool_result(tc.id, output));
@@ -94,17 +92,16 @@ bool Agent::print_callback(const StreamEvent& event) {
 }
 
 std::string Agent::run(const std::string& user_input) {
-    std::string final_response;
-    int round = 0;
-
-    // Build initial messages: system + history + user_input
-    // We'll track the "current" messages separately for the LLM call loop
-    std::vector<Message> llm_messages = build_messages(user_input);
-
-    // Check for empty input
     if (user_input.empty()) {
         return "";
     }
+
+    std::string final_response;
+    int round = 0;
+
+    // Record the user message in history, then build the request from it
+    history_.push_back(Message::user(user_input));
+    std::vector<Message> llm_messages = build_messages();
 
     while (round < max_tool_rounds_) {
         round++;
@@ -121,54 +118,28 @@ std::string Agent::run(const std::string& user_input) {
             break;
         }
 
-        // Collect the assistant message content and tool calls
-        std::string text_content;
-        std::vector<ToolCall> tool_calls;
-
-        if (!result.content.empty()) {
-            text_content = result.content;
-        }
-        if (!result.tool_calls.empty()) {
-            tool_calls = result.tool_calls;
-        }
-
-        // Append assistant message to history
-        if (!tool_calls.empty()) {
-            history_.push_back(Message::assistant_tool_calls(tool_calls));
-
-            // Also add to the current LLM messages for this turn
-            llm_messages.push_back(Message::assistant_tool_calls(tool_calls));
-        }
-        if (!text_content.empty()) {
-            // Note: if we have tool_calls, text_content is usually empty
-            // If we have text without tool calls, this is the final answer
-            if (tool_calls.empty()) {
-                history_.push_back(Message::assistant(text_content));
-                final_response = text_content;
-                break;  // Done — no tool calls to process
+        // No tool calls — this is the final answer
+        if (result.tool_calls.empty()) {
+            if (!result.content.empty()) {
+                history_.push_back(Message::assistant(result.content));
+                final_response = result.content;
             }
-        }
-
-        // If we have tool calls, execute them
-        if (!tool_calls.empty()) {
-            auto tool_results = execute_tools(tool_calls);
-
-            // Add tool results to history
-            for (const auto& tr : tool_results) {
-                history_.push_back(tr);
-                llm_messages.push_back(tr);
-            }
-
-            // Continue loop — LLM will process tool results
-            std::cout << "\n";
-            continue;
-        }
-
-        // Shouldn't reach here normally
-        if (!text_content.empty()) {
-            final_response = text_content;
             break;
         }
+
+        // Assistant message with tool calls (may also carry text content)
+        Message assistant_msg = Message::assistant_tool_calls(result.tool_calls, result.content);
+        history_.push_back(assistant_msg);
+        llm_messages.push_back(assistant_msg);
+
+        // Execute tools and feed results back
+        auto tool_results = execute_tools(result.tool_calls);
+        for (const auto& tr : tool_results) {
+            history_.push_back(tr);
+            llm_messages.push_back(tr);
+        }
+
+        std::cout << "\n";
     }
 
     if (round >= max_tool_rounds_ && final_response.empty()) {

@@ -43,9 +43,11 @@ struct Message {
         return m;
     }
 
-    static Message assistant_tool_calls(const std::vector<ToolCall>& calls) {
+    static Message assistant_tool_calls(const std::vector<ToolCall>& calls,
+                                        const std::string& text = "") {
         Message m;
         m.role = "assistant";
+        m.content = text;
         m.tool_calls = calls;
         return m;
     }

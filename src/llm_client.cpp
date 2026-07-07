@@ -3,26 +3,39 @@
 #include <curl/curl.h>
 #include <nlohmann/json.hpp>
 
+#include <algorithm>
+#include <cstdlib>
 #include <cstring>
-#include <sstream>
 #include <iostream>
 #include <map>
+#include <mutex>
 
 namespace miniagent {
+
+// Cap on how much of the raw response body we keep for error reporting
+static constexpr size_t RAW_BODY_CAP = 8192;
 
 // ============================================================
 // Internal state for SSE parsing via curl write callback
 // ============================================================
 struct StreamState {
     StreamCallback callback;
-    std::string buffer;  // accumulates partial SSE lines
+    std::string buffer;      // accumulates a partial line
+    std::string event_data;  // accumulated "data:" payload of the current SSE event
     std::string text_content;  // collected full text
     std::map<int, ToolCall> pending_tool_calls;  // index -> partial ToolCall
-    std::vector<ToolCall> finished_tool_calls;
     std::string finish_reason;
-    bool has_error = false;
-    std::string error_msg;
+    std::string raw_body;    // first bytes of the response, for HTTP error reporting
+    bool aborted = false;    // callback requested abort
 };
+
+// Deliver an event to the user callback; a false return aborts the stream
+static void emit(StreamState& state, const StreamEvent& event) {
+    if (state.aborted) return;
+    if (!state.callback(event)) {
+        state.aborted = true;
+    }
+}
 
 // Parse a single SSE "data: {...}" line
 static void parse_sse_data(const std::string& data, StreamState& state) {
@@ -46,7 +59,7 @@ static void parse_sse_data(const std::string& data, StreamState& state) {
             StreamEvent event;
             event.type = StreamEventType::TEXT_DELTA;
             event.text = text;
-            state.callback(event);
+            emit(state, event);
         }
 
         // --- Tool calls delta ---
@@ -66,7 +79,7 @@ static void parse_sse_data(const std::string& data, StreamState& state) {
                     event.type = StreamEventType::TOOL_CALL_DELTA;
                     event.tool_call_index = idx;
                     event.tool_call_id = call_id;
-                    state.callback(event);
+                    emit(state, event);
                 }
 
                 // Function name
@@ -79,7 +92,7 @@ static void parse_sse_data(const std::string& data, StreamState& state) {
                         event.type = StreamEventType::TOOL_CALL_DELTA;
                         event.tool_call_index = idx;
                         event.tool_name = pending.name;
-                        state.callback(event);
+                        emit(state, event);
                     }
                     // Function arguments (streamed as JSON fragments)
                     if (func.contains("arguments") && !func["arguments"].is_null()) {
@@ -90,7 +103,7 @@ static void parse_sse_data(const std::string& data, StreamState& state) {
                         event.type = StreamEventType::TOOL_CALL_DELTA;
                         event.tool_call_index = idx;
                         event.text = args;
-                        state.callback(event);
+                        emit(state, event);
                     }
                 }
             }
@@ -103,7 +116,7 @@ static void parse_sse_data(const std::string& data, StreamState& state) {
             StreamEvent event;
             event.type = StreamEventType::FINISH;
             event.finish_reason = state.finish_reason;
-            state.callback(event);
+            emit(state, event);
         }
 
     } catch (const nlohmann::json::exception& e) {
@@ -112,32 +125,51 @@ static void parse_sse_data(const std::string& data, StreamState& state) {
     }
 }
 
-// Curl write callback — accumulates data and parses complete SSE events
+// Curl write callback — accumulates data and parses complete SSE lines.
+// Handles both LF and CRLF line endings, and "data:" with or without a space.
 static size_t write_callback_impl(char* ptr, size_t size, size_t nmemb, void* userdata) {
     auto* state = static_cast<StreamState*>(userdata);
     size_t total = size * nmemb;
 
+    // Keep the head of the raw body for HTTP error reporting
+    if (state->raw_body.size() < RAW_BODY_CAP) {
+        state->raw_body.append(ptr, std::min(total, RAW_BODY_CAP - state->raw_body.size()));
+    }
+
     state->buffer.append(ptr, total);
 
-    // Parse complete SSE events (delimited by "\n\n")
     size_t pos;
-    while ((pos = state->buffer.find("\n\n")) != std::string::npos) {
-        std::string event_block = state->buffer.substr(0, pos);
-        state->buffer.erase(0, pos + 2);
+    while ((pos = state->buffer.find('\n')) != std::string::npos) {
+        std::string line = state->buffer.substr(0, pos);
+        state->buffer.erase(0, pos + 1);
 
-        // Extract "data: ..." line from the event block
-        // Note: SSE events may have multiple lines like "event: ...\ndata: ..."
-        std::istringstream stream(event_block);
-        std::string line;
-        while (std::getline(stream, line)) {
-            // Trim trailing \r
-            if (!line.empty() && line.back() == '\r') {
-                line.pop_back();
+        // Trim trailing \r (CRLF line endings)
+        if (!line.empty() && line.back() == '\r') {
+            line.pop_back();
+        }
+
+        if (line.empty()) {
+            // Blank line = end of SSE event: dispatch accumulated data
+            if (!state->event_data.empty()) {
+                parse_sse_data(state->event_data, *state);
+                state->event_data.clear();
             }
-            if (line.rfind("data: ", 0) == 0) {
-                std::string data = line.substr(6);  // skip "data: "
-                parse_sse_data(data, *state);
+        } else if (line[0] == ':') {
+            // SSE comment line — ignore
+        } else if (line.rfind("data:", 0) == 0) {
+            std::string value = line.substr(5);
+            if (!value.empty() && value.front() == ' ') {
+                value.erase(0, 1);
             }
+            // Per SSE spec, multiple data lines in one event are joined with \n
+            if (!state->event_data.empty()) {
+                state->event_data += '\n';
+            }
+            state->event_data += value;
+        }
+
+        if (state->aborted) {
+            return 0;  // signal curl to abort the transfer
         }
     }
 
@@ -152,12 +184,15 @@ LLMClient::LLMClient()
     : base_url_("https://api.openai.com")
     , model_("gpt-4o")
 {
-    curl_global_init(CURL_GLOBAL_DEFAULT);
+    // curl_global_init/cleanup are not reference-counted; do it once per process
+    static std::once_flag curl_init_flag;
+    std::call_once(curl_init_flag, [] {
+        curl_global_init(CURL_GLOBAL_DEFAULT);
+        std::atexit([] { curl_global_cleanup(); });
+    });
 }
 
-LLMClient::~LLMClient() {
-    curl_global_cleanup();
-}
+LLMClient::~LLMClient() = default;
 
 size_t LLMClient::write_callback(char* ptr, size_t size, size_t nmemb, void* userdata) {
     return write_callback_impl(ptr, size, nmemb, userdata);
@@ -255,22 +290,35 @@ ChatResult LLMClient::chat(
     // Perform request
     CURLcode res = curl_easy_perform(curl);
 
-    if (res != CURLE_OK) {
+    long http_code = 0;
+    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
+
+    bool user_aborted = (res == CURLE_WRITE_ERROR && state.aborted);
+
+    if (res != CURLE_OK && !user_aborted) {
         result.success = false;
         result.error_message = std::string("curl error: ") + curl_easy_strerror(res);
+    } else if (http_code >= 400) {
+        result.success = false;
+        result.error_message = "HTTP " + std::to_string(http_code);
+        // Error responses are plain JSON, not SSE — surface the body
+        std::string body = state.raw_body;
+        while (!body.empty() && (body.back() == '\n' || body.back() == '\r')) {
+            body.pop_back();
+        }
+        if (!body.empty()) {
+            result.error_message += ": " + body;
+        }
     } else {
-        long http_code = 0;
-        curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
-        if (http_code >= 400) {
-            result.success = false;
-            result.error_message = "HTTP " + std::to_string(http_code);
-        } else {
-            result.success = true;
-            result.content = state.text_content;
-            // Move finished tool calls, sorted by index
-            for (auto& [idx, tc] : state.pending_tool_calls) {
-                result.tool_calls.push_back(std::move(tc));
-            }
+        // Dispatch a trailing event not terminated by a blank line
+        if (!state.aborted && !state.event_data.empty()) {
+            parse_sse_data(state.event_data, state);
+        }
+        result.success = true;  // partial content on user abort is still a success
+        result.content = state.text_content;
+        // Move collected tool calls, sorted by index (std::map iterates in order)
+        for (auto& [idx, tc] : state.pending_tool_calls) {
+            result.tool_calls.push_back(std::move(tc));
         }
     }
 
