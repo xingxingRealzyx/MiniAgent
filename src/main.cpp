@@ -10,6 +10,8 @@
 #include <sstream>
 #include <cstdlib>
 #include <cstring>
+#include <ctime>
+#include <sys/utsname.h>
 #include <unistd.h>
 
 // ANSI color helpers
@@ -17,6 +19,32 @@
 #define COLOR_BOLD    "\033[1m"
 #define COLOR_CYAN    "\033[36m"
 #define COLOR_GREEN   "\033[32m"
+
+// Environment context appended to the system prompt so the model knows
+// where it is (cwd, platform, date) without having to probe with tools
+static std::string build_env_info() {
+    std::ostringstream oss;
+    oss << "\n## Environment\n";
+
+    char cwd[4096];
+    if (getcwd(cwd, sizeof(cwd))) {
+        oss << "- Working directory: " << cwd << "\n";
+    }
+
+    struct utsname un;
+    if (uname(&un) == 0) {
+        oss << "- Platform: " << un.sysname << " " << un.release
+            << " (" << un.machine << ")\n";
+    }
+
+    std::time_t t = std::time(nullptr);
+    char date_buf[32];
+    if (std::strftime(date_buf, sizeof(date_buf), "%Y-%m-%d", std::localtime(&t))) {
+        oss << "- Date: " << date_buf << "\n";
+    }
+
+    return oss.str();
+}
 
 static void print_banner() {
     std::cout << COLOR_CYAN << COLOR_BOLD
@@ -128,6 +156,7 @@ int main(int argc, char* argv[]) {
     tools->register_tool(std::make_unique<miniagent::BashTool>());
 
     miniagent::Agent agent(client, tools);
+    agent.set_system_prompt(std::string(miniagent::DEFAULT_SYSTEM_PROMPT) + build_env_info());
     agent.set_max_tool_rounds(10);
 
     // Auto-detect: pipe input → single-shot; tty → REPL

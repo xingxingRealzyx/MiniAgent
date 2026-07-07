@@ -35,7 +35,14 @@ std::vector<Message> Agent::build_messages() const {
 std::vector<Message> Agent::execute_tools(const std::vector<ToolCall>& tool_calls) {
     std::vector<Message> results;
     for (const auto& tc : tool_calls) {
-        std::cout << "\n\033[36m[Tool: " << tc.name << "]\033[0m\n";
+        // Show the tool name and its arguments (dimmed, truncated if long)
+        std::string args_preview = tc.arguments.empty() ? "{}" : tc.arguments;
+        if (args_preview.size() > 300) {
+            args_preview.resize(300);
+            args_preview += "...";
+        }
+        std::cout << "\n\033[36m[Tool: " << tc.name << "]\033[0m \033[2m"
+                  << args_preview << "\033[0m\n";
 
         // Parse arguments from JSON string
         nlohmann::json args;
