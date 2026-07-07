@@ -77,7 +77,7 @@ std::vector<Message> Agent::execute_tools(const std::vector<ToolCall>& tool_call
             correction["result"] =
                 "Executed, but '" + tc.name + "' is a streaming command, not a "
                 "function tool. Next time embed it inline in your reply text: "
-                "<tool>{\"name\":\"" + tc.name + "\",\"args\":{...}}</tool>";
+                + stream_tools_->example_for(tc.name);
             output = correction.dump();
         } else {
             output = tools_->execute(tc.name, args);
@@ -101,19 +101,76 @@ std::vector<Message> Agent::execute_tools(const std::vector<ToolCall>& tool_call
     return results;
 }
 
+// Loose recovery for a command whose JSON failed to parse. Targets the
+// single-string-arg shape {"name":"X","args":{"key":"..."}}: locates each
+// field structurally and takes the value from its opening quote to the LAST
+// quote in the payload, so unescaped quotes inside the content (a story with
+// dialogue) and a missing trailing brace can't defeat it. Recovers the first
+// arg only — enough for one-way stream tools like tts/echo.
+static bool extract_loose_command(const std::string& payload,
+                                  std::string& name, nlohmann::json& args) {
+    // name: "name" : "<identifier>" — tool names carry no inner quotes
+    size_t np = payload.find("\"name\"");
+    if (np == std::string::npos) return false;
+    size_t nq = payload.find('"', payload.find(':', np + 6) + 1);
+    if (nq == std::string::npos) return false;
+    size_t nq_end = payload.find('"', nq + 1);
+    if (nq_end == std::string::npos) return false;
+    name = payload.substr(nq + 1, nq_end - nq - 1);
+
+    // args: first "key" inside the args object
+    size_t ap = payload.find("\"args\"", nq_end);
+    if (ap == std::string::npos) return false;
+    size_t kq = payload.find('"', payload.find('{', ap) + 1);
+    if (kq == std::string::npos) return false;
+    size_t kq_end = payload.find('"', kq + 1);
+    if (kq_end == std::string::npos) return false;
+    std::string key = payload.substr(kq + 1, kq_end - kq - 1);
+
+    // value: opening quote after the key, closing at the payload's last quote
+    size_t vq = payload.find('"', payload.find(':', kq_end + 1) + 1);
+    if (vq == std::string::npos) return false;
+    size_t vq_end = payload.rfind('"');
+    if (vq_end <= vq) return false;
+
+    args = nlohmann::json::object();
+    args[key] = payload.substr(vq + 1, vq_end - vq - 1);
+    return true;
+}
+
 void Agent::handle_stream_command(const std::string& payload) {
+    std::string name;
+    nlohmann::json args;
+
     try {
         auto cmd = nlohmann::json::parse(payload);
-        std::string name = cmd.value("name", "");
-        nlohmann::json args = cmd.value("args", nlohmann::json::object());
-
-        if (!stream_tools_->dispatch(name, args)) {
-            std::cerr << "\033[31m[Unknown stream tool: " << name << "]\033[0m\n";
-        }
+        name = cmd.value("name", "");
+        args = cmd.value("args", nlohmann::json::object());
     } catch (const nlohmann::json::exception&) {
-        // Malformed command — degrade to visible text so nothing is lost
-        std::cout << "\033[2m" << payload << "\033[0m" << std::flush;
+        // Strict parse failed (model wrote malformed JSON) — try structural
+        // recovery before giving up
+        if (!extract_loose_command(payload, name, args)) {
+            std::cout << "\033[2m" << payload << "\033[0m" << std::flush;
+            return;
+        }
+        std::cerr << "\033[2m[stream command: recovered malformed JSON]\033[0m\n";
     }
+
+    if (!stream_tools_->has(name)) {
+        std::cerr << "\033[31m[Unknown stream tool: " << name << "]\033[0m\n";
+        return;
+    }
+
+    // Show the call like a regular tool: name + args (dimmed, truncated)
+    std::string args_preview = args.dump();
+    if (args_preview.size() > 300) {
+        args_preview.resize(300);
+        args_preview += "...";
+    }
+    std::cout << "\n\033[36m[Stream tool: " << name << "]\033[0m \033[2m"
+              << args_preview << "\033[0m\n" << std::flush;
+
+    stream_tools_->dispatch(name, args);
 }
 
 std::string Agent::run(const std::string& user_input) {
@@ -137,7 +194,7 @@ std::string Agent::run(const std::string& user_input) {
 
         // Inline commands cannot span rounds — fresh parser per round.
         // It splits the text stream into display text and command payloads.
-        StreamCommandParser parser("<tool>", "</tool>",
+        StreamCommandParser parser(kStreamCmdOpen, kStreamCmdClose,
             [this](const std::string& payload) { handle_stream_command(payload); });
 
         // Call LLM with streaming

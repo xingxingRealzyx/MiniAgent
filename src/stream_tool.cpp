@@ -81,12 +81,29 @@ void StreamToolRegistry::register_tool(std::unique_ptr<StreamTool> tool) {
     workers_.push_back(std::move(worker));
 }
 
+std::string StreamToolRegistry::build_example(const StreamTool& tool) {
+    return std::string(kStreamCmdOpen) + "{\"name\":\"" + tool.name()
+         + "\",\"args\":" + tool.args_doc() + "}" + kStreamCmdClose;
+}
+
+std::string StreamToolRegistry::example_for(const std::string& name) const {
+    auto it = worker_map_.find(name);
+    return it == worker_map_.end() ? std::string()
+                                   : build_example(*it->second->tool);
+}
+
 std::string StreamToolRegistry::protocol_prompt() const {
-    std::string p =
+    if (workers_.empty()) {
+        return "";
+    }
+    std::string p = std::string() +
         "\n## Streaming commands\n"
         "While writing your reply you can trigger real-time, fire-and-forget "
-        "actions by embedding a command inline in your text:\n"
-        "<tool>{\"name\":\"<command>\",\"args\":{...}}</tool>\n"
+        "actions by embedding a command inline, in the middle of your prose. "
+        "Example — note the command sits immediately after the sentence, on "
+        "the same line, with no blank lines or line breaks around it:\n"
+        "...end of a sentence." + build_example(*workers_.front()->tool) +
+        "Next sentence continues...\n"
         "The command executes the moment its closing tag is emitted; you keep "
         "writing normally after it. Commands return no result.\n"
         "Available commands:\n";
@@ -95,11 +112,15 @@ std::string StreamToolRegistry::protocol_prompt() const {
            + " Args: " + worker->tool->args_doc() + "\n";
     }
     p += "Rules:\n"
-         "- These commands are NOT function tools. Never invoke them via "
-         "function calling — embed them inline in your reply text exactly "
-         "as shown above.\n"
-         "- The whole command must be valid JSON on a single line, "
-         "not wrapped in code fences.\n"
+         "- These are NOT function tools — never invoke them via function "
+         "calling; write them inline exactly as shown above.\n"
+         "- Prose and commands are independent channels; you decide what "
+         "goes where. Each must be coherent on its own: don't split or "
+         "duplicate one piece of content across both, and don't reference "
+         "the other channel's progress.\n"
+         "- Commands sit inside the text flow: never on their own line, no "
+         "blank lines around them, JSON on one line, no code fences. "
+         "Commands may follow each other back to back.\n"
          "- Never show or mention these tags to the user.\n";
     return p;
 }

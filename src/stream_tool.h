@@ -13,10 +13,17 @@
 
 namespace miniagent {
 
+// Inline command markers. XML-style keeps the model inside its trained
+// tool-call writing habits (JSON stays well-formed), but the tag must NOT
+// start with "<tool": that prefix collides with provider-side native
+// tool-call parsers (MiniMax aborts the stream in tools-enabled requests).
+inline constexpr const char* kStreamCmdOpen = "<cmd>";
+inline constexpr const char* kStreamCmdClose = "</cmd>";
+
 // A StreamTool is a fire-and-forget action the model triggers by embedding
 // an inline command in its reply text:
 //
-//   <tool>{"name":"echo","args":{"message":"..."}}</tool>
+//   <cmd>{"name":"echo","args":{"message":"..."}}</cmd>
 //
 // Unlike regular tools (native function calling), a stream tool:
 //   - executes the moment its closing tag streams out, while the model is
@@ -65,6 +72,9 @@ public:
     // command format and the registered tools
     std::string protocol_prompt() const;
 
+    // Complete example command for a registered tool (empty if unknown)
+    std::string example_for(const std::string& name) const;
+
     // Enqueue a command onto its tool's worker; returns immediately.
     // Returns false if the tool is unknown.
     bool dispatch(const std::string& name, const nlohmann::json& args);
@@ -87,6 +97,10 @@ private:
 
     static void worker_loop(Worker* w);
     static void stop_worker(Worker& w);
+
+    // Structurally complete example built from the tool's own args_doc —
+    // the model copies exemplars, so the example must be valid JSON shape
+    static std::string build_example(const StreamTool& tool);
 
     std::vector<std::unique_ptr<Worker>> workers_;
     std::unordered_map<std::string, Worker*> worker_map_;

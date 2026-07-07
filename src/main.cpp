@@ -106,6 +106,7 @@ static void print_usage(const char* prog) {
               << "  OPENAI_API_KEY   API key (required)\n"
               << "  OPENAI_BASE_URL  Base URL (default: https://api.openai.com)\n"
               << "  OPENAI_MODEL     Model name (default: gpt-4o)\n"
+              << "  MINIAGENT_TTS_VOICE  macOS voice for tts (e.g. Tingting; default: system voice)\n"
               << "\nExamples:\n"
               << "  miniagent                           # interactive REPL\n"
               << "  echo \"List files\" | miniagent       # single-turn via pipe\n"
@@ -158,8 +159,8 @@ int main(int argc, char* argv[]) {
     tools->register_tool(std::make_unique<miniagent::BashTool>());
 
     auto stream_tools = std::make_shared<miniagent::StreamToolRegistry>();
-    stream_tools->register_tool(std::make_unique<miniagent::EchoStreamTool>());
     stream_tools->register_tool(std::make_unique<miniagent::TtsStreamTool>());
+    stream_tools->register_tool(std::make_unique<miniagent::EchoStreamTool>());
 
     miniagent::Agent agent(client, tools, stream_tools);
     agent.set_system_prompt(std::string(miniagent::DEFAULT_SYSTEM_PROMPT) + build_env_info());

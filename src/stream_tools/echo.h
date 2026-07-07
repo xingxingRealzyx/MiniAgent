@@ -14,7 +14,7 @@ public:
         return "Show the user a short real-time status line while you keep writing.";
     }
     std::string args_doc() const override {
-        return "{\"message\": \"<string>\"}";
+        return "{\"message\": \"正在分析代码\"}";
     }
     void execute(const nlohmann::json& args) override;
 };
