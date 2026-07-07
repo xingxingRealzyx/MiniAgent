@@ -16,8 +16,5 @@ cmake-build-*/
 .DS_Store
 Thumbs.db
 
-# Dependencies
-third_party/
-
 # Environment
 .env
