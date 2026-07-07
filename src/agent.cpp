@@ -6,9 +6,13 @@
 
 namespace miniagent {
 
-Agent::Agent(std::shared_ptr<LLMClient> client, std::shared_ptr<ToolRegistry> tools)
+Agent::Agent(std::shared_ptr<LLMClient> client,
+             std::shared_ptr<ToolRegistry> tools,
+             std::shared_ptr<StreamToolRegistry> stream_tools)
     : client_(std::move(client))
     , tools_(std::move(tools))
+    , stream_tools_(stream_tools ? std::move(stream_tools)
+                                 : std::make_shared<StreamToolRegistry>())
     , system_prompt_(DEFAULT_SYSTEM_PROMPT)
 {
 }
@@ -20,9 +24,13 @@ void Agent::reset() {
 std::vector<Message> Agent::build_messages() const {
     std::vector<Message> messages;
 
-    // System prompt
+    // System prompt, plus the inline-command protocol if stream tools exist
     if (!system_prompt_.empty()) {
-        messages.push_back(Message::system(system_prompt_));
+        std::string sys = system_prompt_;
+        if (stream_tools_->count() > 0) {
+            sys += stream_tools_->protocol_prompt();
+        }
+        messages.push_back(Message::system(sys));
     }
 
     // History (already includes the current user input)
@@ -58,8 +66,22 @@ std::vector<Message> Agent::execute_tools(const std::vector<ToolCall>& tool_call
             continue;
         }
 
-        // Execute tool
-        std::string output = tools_->execute(tc.name, args);
+        // The model sometimes mistakes a stream tool for a function tool.
+        // Execute it anyway (the user still gets the effect), but teach the
+        // model the inline syntax in the result so it self-corrects.
+        std::string output;
+        if (!tools_->has(tc.name) && stream_tools_->has(tc.name)) {
+            stream_tools_->dispatch(tc.name, args);
+            nlohmann::json correction;
+            correction["success"] = true;
+            correction["result"] =
+                "Executed, but '" + tc.name + "' is a streaming command, not a "
+                "function tool. Next time embed it inline in your reply text: "
+                "<tool>{\"name\":\"" + tc.name + "\",\"args\":{...}}</tool>";
+            output = correction.dump();
+        } else {
+            output = tools_->execute(tc.name, args);
+        }
 
         // Print first few lines of output for visibility
         std::istringstream stream(output);
@@ -79,24 +101,19 @@ std::vector<Message> Agent::execute_tools(const std::vector<ToolCall>& tool_call
     return results;
 }
 
-bool Agent::print_callback(const StreamEvent& event) {
-    switch (event.type) {
-    case StreamEventType::TEXT_DELTA:
-        std::cout << event.text << std::flush;
-        break;
-    case StreamEventType::TOOL_CALL_DELTA:
-        // Don't print raw tool call deltas (we'll display executed results)
-        break;
-    case StreamEventType::FINISH:
-        if (event.finish_reason == "tool_calls") {
-            std::cout << "\n\033[33m[Calling tools...]\033[0m\n";
+void Agent::handle_stream_command(const std::string& payload) {
+    try {
+        auto cmd = nlohmann::json::parse(payload);
+        std::string name = cmd.value("name", "");
+        nlohmann::json args = cmd.value("args", nlohmann::json::object());
+
+        if (!stream_tools_->dispatch(name, args)) {
+            std::cerr << "\033[31m[Unknown stream tool: " << name << "]\033[0m\n";
         }
-        break;
-    case StreamEventType::ERROR:
-        std::cerr << "\033[31m[Stream error]\033[0m\n";
-        break;
+    } catch (const nlohmann::json::exception&) {
+        // Malformed command — degrade to visible text so nothing is lost
+        std::cout << "\033[2m" << payload << "\033[0m" << std::flush;
     }
-    return true;  // continue streaming
 }
 
 std::string Agent::run(const std::string& user_input) {
@@ -118,8 +135,36 @@ std::string Agent::run(const std::string& user_input) {
         // Get tools schema
         nlohmann::json tools_schema = tools_->tools_schema();
 
+        // Inline commands cannot span rounds — fresh parser per round.
+        // It splits the text stream into display text and command payloads.
+        StreamCommandParser parser("<tool>", "</tool>",
+            [this](const std::string& payload) { handle_stream_command(payload); });
+
         // Call LLM with streaming
-        ChatResult result = client_->chat(llm_messages, tools_schema, print_callback);
+        ChatResult result = client_->chat(llm_messages, tools_schema,
+            [&parser](const StreamEvent& event) {
+                switch (event.type) {
+                case StreamEventType::TEXT_DELTA:
+                    std::cout << parser.feed(event.text) << std::flush;
+                    break;
+                case StreamEventType::TOOL_CALL_DELTA:
+                    // Not printed — tool execution is displayed separately
+                    break;
+                case StreamEventType::FINISH:
+                    std::cout << parser.flush() << std::flush;
+                    if (event.finish_reason == "tool_calls") {
+                        std::cout << "\n\033[33m[Calling tools...]\033[0m\n";
+                    }
+                    break;
+                case StreamEventType::ERROR:
+                    std::cerr << "\033[31m[Stream error]\033[0m\n";
+                    break;
+                }
+                return true;
+            });
+
+        // Safety net if the stream ended without a FINISH event
+        std::cout << parser.flush() << std::flush;
 
         if (!result.success) {
             std::cerr << "\033[31m[LLM error: " << result.error_message << "]\033[0m\n";
@@ -155,6 +200,10 @@ std::string Agent::run(const std::string& user_input) {
         final_response = "[Max tool call rounds reached]";
         std::cout << "\033[33m" << final_response << "\033[0m\n";
     }
+
+    // Wait for all pending stream commands before yielding the terminal,
+    // so late output doesn't interleave with the next prompt
+    stream_tools_->drain();
 
     auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::steady_clock::now() - start_time).count();

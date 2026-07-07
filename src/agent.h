@@ -2,6 +2,7 @@
 
 #include "types.h"
 #include "llm_client.h"
+#include "stream_tool.h"
 #include "tool.h"
 
 #include <string>
@@ -12,7 +13,12 @@ namespace miniagent {
 
 class Agent {
 public:
-    Agent(std::shared_ptr<LLMClient> client, std::shared_ptr<ToolRegistry> tools);
+    // tools: native function calling — request/response, ends the round.
+    // stream_tools: inline fire-and-forget commands executed in real time
+    //               while the model is still generating (optional).
+    Agent(std::shared_ptr<LLMClient> client,
+          std::shared_ptr<ToolRegistry> tools,
+          std::shared_ptr<StreamToolRegistry> stream_tools = nullptr);
 
     // Set the system prompt
     void set_system_prompt(const std::string& prompt) { system_prompt_ = prompt; }
@@ -31,6 +37,7 @@ public:
 private:
     std::shared_ptr<LLMClient> client_;
     std::shared_ptr<ToolRegistry> tools_;
+    std::shared_ptr<StreamToolRegistry> stream_tools_;
 
     std::string system_prompt_;
     std::vector<Message> history_;  // conversation history (excl. system prompt)
@@ -42,8 +49,8 @@ private:
     // Execute tool calls and return the tool result messages
     std::vector<Message> execute_tools(const std::vector<ToolCall>& tool_calls);
 
-    // Stream callback: print text deltas to stdout
-    static bool print_callback(const StreamEvent& event);
+    // Handle one complete inline command payload extracted from the stream
+    void handle_stream_command(const std::string& payload);
 };
 
 // Default system prompt for the agent

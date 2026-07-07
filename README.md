@@ -27,8 +27,8 @@ Rust will give you fearless concurrency. Python will give you a one-liner `reque
 │   main.cpp   │────▶│  Agent Loop  │────▶│   LLM Client    │
 │  (REPL/pipe) │     │  (agent.cpp) │     │ (llm_client.cpp)│
 └──────────────┘     └──────┬───────┘     └────────┬────────┘
-                            │                       │
-                            ▼                       ▼
+                            │                      │
+                            ▼                      ▼
                      ┌──────────────┐     ┌─────────────────┐
                      │ Tool Registry│     │  OpenAI API     │
                      │  (tool.cpp)  │     │  (HTTP SSE)     │

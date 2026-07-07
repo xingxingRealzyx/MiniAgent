@@ -5,6 +5,8 @@
 #include "tools/write_file.h"
 #include "tools/edit_file.h"
 #include "tools/bash.h"
+#include "stream_tools/echo.h"
+#include "stream_tools/tts.h"
 
 #include <iostream>
 #include <sstream>
@@ -155,7 +157,11 @@ int main(int argc, char* argv[]) {
     tools->register_tool(std::make_unique<miniagent::EditFileTool>());
     tools->register_tool(std::make_unique<miniagent::BashTool>());
 
-    miniagent::Agent agent(client, tools);
+    auto stream_tools = std::make_shared<miniagent::StreamToolRegistry>();
+    stream_tools->register_tool(std::make_unique<miniagent::EchoStreamTool>());
+    stream_tools->register_tool(std::make_unique<miniagent::TtsStreamTool>());
+
+    miniagent::Agent agent(client, tools, stream_tools);
     agent.set_system_prompt(std::string(miniagent::DEFAULT_SYSTEM_PROMPT) + build_env_info());
     agent.set_max_tool_rounds(10);
 

@@ -8,12 +8,18 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 # Find libcurl
 find_package(CURL REQUIRED)
 
+# Threads (stream tool workers)
+find_package(Threads REQUIRED)
+
 # Sources
 set(SOURCES
     src/main.cpp
     src/agent.cpp
     src/llm_client.cpp
     src/tool.cpp
+    src/stream_tool.cpp
+    src/stream_tools/echo.cpp
+    src/stream_tools/tts.cpp
     src/tools/read_file.cpp
     src/tools/write_file.cpp
     src/tools/edit_file.cpp
@@ -30,7 +36,7 @@ target_include_directories(miniagent PRIVATE
 )
 
 # Link libraries
-target_link_libraries(miniagent PRIVATE CURL::libcurl)
+target_link_libraries(miniagent PRIVATE CURL::libcurl Threads::Threads)
 
 # Compiler warnings
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang|AppleClang")
