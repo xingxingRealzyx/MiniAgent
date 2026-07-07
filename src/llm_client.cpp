@@ -258,7 +258,17 @@ ChatResult LLMClient::chat(
     }
 
     std::string body_str = body.dump();
-    std::string url = base_url_ + "/v1/chat/completions";
+
+    // Accept base URLs both with and without a trailing "/v1"
+    // (the OpenAI SDK convention is to include it, e.g. https://api.openai.com/v1)
+    std::string base = base_url_;
+    while (!base.empty() && base.back() == '/') {
+        base.pop_back();
+    }
+    if (base.size() < 3 || base.compare(base.size() - 3, 3, "/v1") != 0) {
+        base += "/v1";
+    }
+    std::string url = base + "/chat/completions";
 
     // Setup curl
     CURL* curl = curl_easy_init();

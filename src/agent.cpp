@@ -1,5 +1,6 @@
 #include "agent.h"
 
+#include <chrono>
 #include <iostream>
 #include <sstream>
 
@@ -103,6 +104,7 @@ std::string Agent::run(const std::string& user_input) {
         return "";
     }
 
+    auto start_time = std::chrono::steady_clock::now();
     std::string final_response;
     int round = 0;
 
@@ -153,6 +155,10 @@ std::string Agent::run(const std::string& user_input) {
         final_response = "[Max tool call rounds reached]";
         std::cout << "\033[33m" << final_response << "\033[0m\n";
     }
+
+    auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - start_time).count();
+    std::cout << "\n\033[2m[" << elapsed_ms << "ms]\033[0m";
 
     return final_response;
 }
